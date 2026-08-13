@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
@@ -35,15 +35,26 @@ jobs:
           echo "SLN_PATH=$($sln.FullName)" >> $env:GITHUB_ENV
 
       - name: Restore NuGet packages
-        run: nuget restore "${{ env.SLN_PATH }}"
+        shell: powershell
+        run: |
+          nuget restore "${{ env.SLN_PATH }}"
 
       - name: Build Application
-        run: msbuild "${{ env.SLN_PATH }}" /p:Configuration=Release /p:Platform="Any CPU"
+        shell: powershell
+        run: |
+          msbuild "${{ env.SLN_PATH }}" /p:Configuration=Release /p:Platform="Any CPU"
 
       - name: Verify Publish Output
+        shell: powershell
         run: |
-          echo "Listing publish_output folder..."
-          ls -R publish_output
+          Write-Host "Listing publish_output folder..."
+
+          if (!(Test-Path "publish_output")) {
+              Write-Error "publish_output folder does not exist."
+              exit 1
+          }
+
+          Get-ChildItem "publish_output" -Recurse
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
@@ -54,6 +65,7 @@ jobs:
 
   deploy:
     needs: build
+
     runs-on:
       - self-hosted
       - Windows
@@ -81,14 +93,19 @@ jobs:
               New-Item -ItemType Directory -Path $destination -Force
           }
 
-          # Remove old files
-          Get-ChildItem $destination -Recurse -Force | Remove-Item -Recurse -Force
+          Write-Host "Removing old files..."
 
-          # Copy new build
+          Get-ChildItem $destination -Recurse -Force |
+              Remove-Item -Recurse -Force
+
+          Write-Host "Copying new build..."
+
           Copy-Item "$source\*" `
               -Destination $destination `
               -Recurse `
               -Force
+
+          Write-Host "Deployment completed."
 
       - name: Start App Pool
         shell: powershell
@@ -99,4 +116,7 @@ jobs:
       - name: Cleanup Temporary Files
         shell: powershell
         run: |
-          Remove-Item "C:\deploy\webapi-temp" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item "C:\deploy\webapi-temp" `
+              -Recurse `
+              -Force `
+              -ErrorAction SilentlyContinue
