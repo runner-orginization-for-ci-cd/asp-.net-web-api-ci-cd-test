@@ -1,0 +1,90 @@
+name: ASP.NET CI/CD to IIS
+
+on:
+  push:
+    branches:
+      - maser
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '4.x'
+
+      - name: Restore Dependencies
+        run: dotnet restore MyApi/MyApi.csproj
+
+      - name: Build Application
+        run: dotnet build MyApi/MyApi.csproj -c Release --no-restore
+
+      - name: Publish Application
+        run: dotnet publish MyApi/MyApi.csproj -c Release -o publish_output --no-build
+
+      - name: Verify Publish Output
+        run: |
+          echo "Listing publish_output folder..."
+          ls -R publish_output
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapi-publish
+          path: publish_output
+          retention-days: 2
+
+  deploy:
+    needs: build
+    runs-on:
+      - self-hosted
+      - Windows
+
+    steps:
+      - name: Download Build Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: webapi-publish
+          path: C:\deploy\webapi-temp
+
+      - name: Stop App Pool
+        shell: powershell
+        run: |
+          Import-Module WebAdministration
+          Stop-WebAppPool -Name "MyApiAppPool"
+
+      - name: Deploy Application to IIS
+        shell: powershell
+        run: |
+          $source = "C:\deploy\webapi-temp"
+          $destination = "C:\inetpub\wwwroot\aspwebapi5"
+
+          if (!(Test-Path $destination)) {
+              New-Item -ItemType Directory -Path $destination -Force
+          }
+
+          # Remove old files
+          Get-ChildItem $destination -Recurse -Force | Remove-Item -Recurse -Force
+
+          # Copy new build
+          Copy-Item "$source\*" `
+              -Destination $destination `
+              -Recurse `
+              -Force
+
+      - name: Start App Pool
+        shell: powershell
+        run: |
+          Import-Module WebAdministration
+          Start-WebAppPool -Name "MyApiAppPool"
+
+      - name: Cleanup Temporary Files
+        shell: powershell
+        run: |
+          Remove-Item "C:\deploy\webapi-temp" -Recurse -Force -ErrorAction SilentlyContinue
