@@ -4,43 +4,63 @@ on:
   push:
     branches:
       - master
+
   workflow_dispatch:
+
+
+# ==================================================
+# GLOBAL VARIABLES
+# ==================================================
+env:
+  BUILD_CONFIGURATION: Release
+
+  ARTIFACT_NAME: WebApi
+
+  APP_POOL_NAME: aspwebapi5pool
+
+  IIS_PATH: C:\inetpub\wwwroot\aspwebapi5
+
+  BACKUP_PATH: C:\Backups\aspwebapi5
+
+  DEPLOY_PATH: C:\deploy\WebApi
+
 
 jobs:
 
+  # ==================================================
+  # BUILD
+  # ==================================================
   build:
+    name: Build and Publish Web API
 
     runs-on: windows-latest
 
-    env:
-      BUILD_CONFIGURATION: Release
-
     steps:
 
-      # -----------------------------
+      # ----------------------------------------------
       # Checkout
-      # -----------------------------
+      # ----------------------------------------------
       - name: Checkout Repository
         uses: actions/checkout@v4
 
 
-      # -----------------------------
-      # Install NuGet
-      # -----------------------------
+      # ----------------------------------------------
+      # Setup NuGet
+      # ----------------------------------------------
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
 
 
-      # -----------------------------
+      # ----------------------------------------------
       # Setup MSBuild
-      # -----------------------------
+      # ----------------------------------------------
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
 
-      # -----------------------------
+      # ----------------------------------------------
       # Find Solution
-      # -----------------------------
+      # ----------------------------------------------
       - name: Find Solution
         shell: powershell
         run: |
@@ -56,15 +76,15 @@ jobs:
               exit 1
           }
 
-          Write-Host "Solution:"
+          Write-Host "Solution found:"
           Write-Host $sln.FullName
 
           "SOLUTION=$($sln.FullName)" >> $env:GITHUB_ENV
 
 
-      # -----------------------------
+      # ----------------------------------------------
       # Restore NuGet Packages
-      # -----------------------------
+      # ----------------------------------------------
       - name: Restore NuGet Packages
         shell: powershell
         run: |
@@ -72,9 +92,9 @@ jobs:
           nuget restore "$env:SOLUTION"
 
 
-      # -----------------------------
+      # ----------------------------------------------
       # Build + Publish
-      # -----------------------------
+      # ----------------------------------------------
       - name: Publish Web API
         shell: powershell
         run: |
@@ -88,7 +108,8 @@ jobs:
           New-Item `
             -ItemType Directory `
             -Path $publishPath `
-            -Force | Out-Null
+            -Force |
+            Out-Null
 
           Write-Host "Publishing to:"
           Write-Host $publishPath
@@ -104,48 +125,325 @@ jobs:
             /p:publishUrl="$publishPath"
 
 
-      # -----------------------------
+      # ----------------------------------------------
       # Verify Published Files
-      # -----------------------------
+      # ----------------------------------------------
       - name: Verify Published Files
         shell: powershell
         run: |
 
           $path = "$env:GITHUB_WORKSPACE\publish_output"
 
-          Write-Host "======================================"
-          Write-Host "Publish Path: $path"
-          Write-Host "======================================"
-
           if (!(Test-Path $path)) {
-              Write-Error "PUBLISH FAILED: Folder was not created."
+              Write-Error "Publish folder does not exist."
               exit 1
           }
 
           $files = Get-ChildItem `
-            $path `
+            -Path $path `
             -Recurse `
             -File
 
           if ($files.Count -eq 0) {
-              Write-Error "PUBLISH FAILED: No files were published."
+              Write-Error "Publish folder is empty."
               exit 1
           }
 
           Write-Host "Published files: $($files.Count)"
 
-          Get-ChildItem `
-            $path `
-            -Recurse
 
-
-      # -----------------------------
+      # ----------------------------------------------
       # Upload Artifact
-      # -----------------------------
+      # ----------------------------------------------
       - name: Upload Web API Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WebApi
+          name: ${{ env.ARTIFACT_NAME }}
           path: ${{ github.workspace }}/publish_output
           if-no-files-found: error
           retention-days: 2
+
+
+  # ==================================================
+  # DEPLOY
+  # ==================================================
+  deploy:
+    name: Deploy to IIS
+
+    needs: build
+
+    runs-on:
+      - self-hosted
+      - Windows
+
+    steps:
+
+      # ----------------------------------------------
+      # Download Artifact
+      # ----------------------------------------------
+      - name: Download Web API Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.DEPLOY_PATH }}
+
+
+      # ----------------------------------------------
+      # Verify Artifact
+      # ----------------------------------------------
+      - name: Verify Artifact
+        shell: powershell
+        run: |
+
+          $source = $env:DEPLOY_PATH
+
+          if (!(Test-Path $source)) {
+              Write-Error "Artifact folder does not exist: $source"
+              exit 1
+          }
+
+          $files = Get-ChildItem `
+            -Path $source `
+            -Recurse `
+            -File
+
+          if ($files.Count -eq 0) {
+              Write-Error "Artifact folder is empty."
+              exit 1
+          }
+
+          Write-Host "Downloaded files: $($files.Count)"
+
+
+      # ----------------------------------------------
+      # Stop IIS App Pool
+      # ----------------------------------------------
+      - name: Stop App Pool
+        shell: powershell
+        run: |
+
+          Import-Module WebAdministration
+
+          $poolName = $env:APP_POOL_NAME
+
+          $pool = Get-WebAppPoolState `
+            -Name $poolName `
+            -ErrorAction SilentlyContinue
+
+          if (-not $pool) {
+              Write-Error "App pool '$poolName' was not found."
+              exit 1
+          }
+
+          if ($pool.Value -eq "Started") {
+
+              Stop-WebAppPool -Name $poolName
+
+              Write-Host "App pool '$poolName' stopped."
+
+              Start-Sleep -Seconds 3
+
+          }
+          else {
+
+              Write-Host "App pool '$poolName' is already stopped."
+          }
+
+
+      # ----------------------------------------------
+      # Backup Current Application
+      # ----------------------------------------------
+      - name: Backup Current Application
+        shell: powershell
+        run: |
+
+          $sitePath = $env:IIS_PATH
+          $backupRoot = $env:BACKUP_PATH
+
+          $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+
+          $backupPath = Join-Path `
+            $backupRoot `
+            $timestamp
+
+          if (Test-Path $sitePath) {
+
+              Write-Host "Creating backup..."
+
+              New-Item `
+                -ItemType Directory `
+                -Path $backupPath `
+                -Force |
+                Out-Null
+
+              Copy-Item `
+                -Path "$sitePath\*" `
+                -Destination $backupPath `
+                -Recurse `
+                -Force
+
+              Write-Host "Backup created:"
+              Write-Host $backupPath
+
+          }
+          else {
+
+              Write-Host "IIS application directory does not exist."
+              Write-Host "Skipping backup."
+          }
+
+
+      # ----------------------------------------------
+      # Deploy Files
+      # ----------------------------------------------
+      - name: Deploy Web API
+        shell: powershell
+        run: |
+
+          $source = $env:DEPLOY_PATH
+          $destination = $env:IIS_PATH
+
+          if (!(Test-Path $source)) {
+              Write-Error "Source does not exist: $source"
+              exit 1
+          }
+
+          if (!(Test-Path $destination)) {
+
+              New-Item `
+                -ItemType Directory `
+                -Path $destination `
+                -Force |
+                Out-Null
+          }
+
+          Write-Host "Removing old files..."
+
+          Get-ChildItem `
+            -Path $destination `
+            -Recurse `
+            -Force |
+            Remove-Item `
+              -Recurse `
+              -Force `
+              -ErrorAction Stop
+
+          Write-Host "Copying new files..."
+
+          Copy-Item `
+            -Path "$source\*" `
+            -Destination $destination `
+            -Recurse `
+            -Force
+
+          Write-Host "Deployment completed."
+
+
+      # ----------------------------------------------
+      # Verify Deployment
+      # ----------------------------------------------
+      - name: Verify IIS Deployment
+        shell: powershell
+        run: |
+
+          $destination = $env:IIS_PATH
+
+          if (!(Test-Path $destination)) {
+              Write-Error "IIS directory does not exist."
+              exit 1
+          }
+
+          $files = Get-ChildItem `
+            -Path $destination `
+            -Recurse `
+            -File
+
+          if ($files.Count -eq 0) {
+              Write-Error "No files found in IIS directory."
+              exit 1
+          }
+
+          Write-Host "IIS contains $($files.Count) files."
+
+
+      # ----------------------------------------------
+      # Start IIS App Pool
+      # ALWAYS RUN
+      # ----------------------------------------------
+      - name: Start App Pool
+        if: always()
+        shell: powershell
+        run: |
+
+          Import-Module WebAdministration
+
+          $poolName = $env:APP_POOL_NAME
+
+          $pool = Get-WebAppPoolState `
+            -Name $poolName `
+            -ErrorAction SilentlyContinue
+
+          if (-not $pool) {
+              Write-Error "App pool '$poolName' was not found."
+              exit 1
+          }
+
+          if ($pool.Value -eq "Stopped") {
+
+              Start-WebAppPool -Name $poolName
+
+              Start-Sleep -Seconds 3
+
+              Write-Host "App pool '$poolName' started."
+
+          }
+          else {
+
+              Write-Host "App pool '$poolName' is already running."
+          }
+
+
+      # ----------------------------------------------
+      # Verify App Pool
+      # ----------------------------------------------
+      - name: Verify App Pool
+        if: always()
+        shell: powershell
+        run: |
+
+          Import-Module WebAdministration
+
+          $poolName = $env:APP_POOL_NAME
+
+          $pool = Get-WebAppPoolState `
+            -Name $poolName `
+            -ErrorAction SilentlyContinue
+
+          if (-not $pool) {
+              Write-Error "App pool '$poolName' was not found."
+              exit 1
+          }
+
+          Write-Host "App Pool State: $($pool.Value)"
+
+          if ($pool.Value -ne "Started") {
+              Write-Error "App pool '$poolName' is not running."
+              exit 1
+          }
+
+
+      # ----------------------------------------------
+      # Cleanup
+      # ----------------------------------------------
+      - name: Cleanup
+        if: always()
+        shell: powershell
+        run: |
+
+          Remove-Item `
+            $env:DEPLOY_PATH `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "Temporary deployment files removed."
