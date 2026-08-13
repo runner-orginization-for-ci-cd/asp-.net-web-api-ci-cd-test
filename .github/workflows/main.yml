@@ -175,7 +175,7 @@ jobs:
     runs-on:
       - self-hosted
       - Windows
-       -deployment
+       
 
     steps:
 
