@@ -1,4 +1,4 @@
-name: ASP.NET CI/CD to IIS
+name: ASP.NET Web App CI/CD
 
 on:
   push:
@@ -8,15 +8,15 @@ on:
 
 jobs:
 
-  # ==========================================
+  # =========================
   # BUILD
-  # ==========================================
+  # =========================
   build:
     runs-on: windows-latest
 
     steps:
 
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup NuGet
@@ -25,111 +25,32 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # ----------------------------------------
-      # Find solution
-      # ----------------------------------------
-      - name: Find Solution
-        id: solution
-        shell: powershell
-        run: |
-          $sln = Get-ChildItem -Path $env:GITHUB_WORKSPACE `
-            -Filter *.sln `
-            -Recurse |
-            Select-Object -First 1
-
-          if (-not $sln) {
-            Write-Error "No .sln file found."
-            exit 1
-          }
-
-          Write-Host "Solution found:"
-          Write-Host $sln.FullName
-
-          "SLN_PATH=$($sln.FullName)" >> $env:GITHUB_ENV
-
-      # ----------------------------------------
-      # Restore NuGet
-      # ----------------------------------------
       - name: Restore NuGet Packages
-        shell: powershell
-        run: |
-          nuget restore "$env:SLN_PATH"
+        run: nuget restore
 
-      # ----------------------------------------
-      # Build
-      # ----------------------------------------
       - name: Build Solution
-        shell: powershell
+        run: msbuild /p:Configuration=Release
+
+      - name: Publish Web App
         run: |
-          msbuild "$env:SLN_PATH" `
-            /m `
-            /p:Configuration=Release `
-            /p:DeployOnBuild=false
-
-      # ----------------------------------------
-      # Publish ASP.NET Web API
-      # ----------------------------------------
-      - name: Publish Application
-        shell: powershell
-        run: |
-
-          $publishPath = "$env:GITHUB_WORKSPACE\publish_output"
-
-          if (Test-Path $publishPath) {
-              Remove-Item $publishPath -Recurse -Force
-          }
-
-          New-Item `
-            -ItemType Directory `
-            -Path $publishPath `
-            -Force | Out-Null
-
-          Write-Host "Publishing application..."
-
-          msbuild "$env:SLN_PATH" `
-            /m `
+          msbuild "asnetwebapi5(git actions).csproj" `
             /p:Configuration=Release `
             /p:DeployOnBuild=true `
             /p:WebPublishMethod=FileSystem `
             /p:DeleteExistingFiles=true `
-            /p:publishUrl="$publishPath"
+            /p:publishUrl="${{ github.workspace }}\publish_output"
 
-      # ----------------------------------------
-      # Verify
-      # ----------------------------------------
-      - name: Verify Publish Output
-        shell: powershell
-        run: |
-
-          $publishPath = "$env:GITHUB_WORKSPACE\publish_output"
-
-          if (!(Test-Path $publishPath)) {
-              Write-Error "Publish output was not created."
-              exit 1
-          }
-
-          Write-Host ""
-          Write-Host "======================================"
-          Write-Host " PUBLISH OUTPUT"
-          Write-Host "======================================"
-
-          Get-ChildItem $publishPath -Recurse
-
-      # ----------------------------------------
-      # Upload artifact
-      # ----------------------------------------
-      - name: Upload Build Artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: webapi-publish
+          name: webapp
           path: publish_output
           if-no-files-found: error
-          retention-days: 2
 
 
-  # ==========================================
+  # =========================
   # DEPLOY TO IIS
-  # ==========================================
+  # =========================
   deploy:
     needs: build
 
@@ -139,121 +60,45 @@ jobs:
 
     steps:
 
-      # ----------------------------------------
-      # Download artifact
-      # ----------------------------------------
-      - name: Download Build Artifact
+      - name: Download Artifact
         uses: actions/download-artifact@v4
         with:
-          name: webapi-publish
-          path: C:\deploy\webapi-temp
+          name: webapp
+          path: C:\deploy\webapp
 
-      # ----------------------------------------
-      # Stop IIS App Pool
-      # ----------------------------------------
-      - name: Stop App Pool
+      - name: Stop IIS App Pool
         shell: powershell
         run: |
-
           Import-Module WebAdministration
+          Stop-WebAppPool -Name "aspwebapi5pool"
 
-          $pool = "MyApiAppPool"
-
-          if (Test-Path "IIS:\AppPools\$pool") {
-              Write-Host "Stopping IIS App Pool: $pool"
-
-              Stop-WebAppPool -Name $pool
-
-              Start-Sleep -Seconds 3
-          }
-          else {
-              Write-Error "IIS App Pool '$pool' does not exist."
-              exit 1
-          }
-
-      # ----------------------------------------
-      # Deploy
-      # ----------------------------------------
-      - name: Deploy Application to IIS
+      - name: Deploy to IIS
         shell: powershell
         run: |
-
-          $source = "C:\deploy\webapi-temp"
-          $destination = "C:\inetpub\wwwroot\myapi"
-
-          Write-Host "Source:      $source"
-          Write-Host "Destination: $destination"
+          $source = "C:\deploy\webapp"
+          $destination = "C:\inetpub\wwwroot\aspwebapi5"
 
           if (!(Test-Path $destination)) {
-              New-Item `
-                -ItemType Directory `
-                -Path $destination `
-                -Force | Out-Null
+              New-Item -ItemType Directory -Path $destination -Force
           }
 
-          Write-Host "Removing old application files..."
+          Remove-Item "$destination\*" -Recurse -Force
 
-          Get-ChildItem `
-            -Path $destination `
-            -Recurse `
-            -Force |
-            Remove-Item `
-              -Recurse `
-              -Force `
-              -ErrorAction SilentlyContinue
-
-          Write-Host "Copying new application..."
-
-          Copy-Item `
-            "$source\*" `
+          Copy-Item "$source\*" `
             -Destination $destination `
             -Recurse `
             -Force
 
-          Write-Host "Deployment completed successfully."
-
-      # ----------------------------------------
-      # Start IIS App Pool
-      # ----------------------------------------
-      - name: Start App Pool
+      - name: Start IIS App Pool
         shell: powershell
         run: |
-
           Import-Module WebAdministration
+          Start-WebAppPool -Name "aspwebapi5pool"
 
-          Start-WebAppPool -Name "MyApiAppPool"
-
-          Write-Host "IIS App Pool started successfully."
-
-      # ----------------------------------------
-      # Verify IIS App Pool
-      # ----------------------------------------
-      - name: Verify App Pool
+      - name: Cleanup
         shell: powershell
         run: |
-
-          Import-Module WebAdministration
-
-          $pool = Get-WebAppPoolState -Name "MyApiAppPool"
-
-          Write-Host "IIS App Pool State: $($pool.Value)"
-
-          if ($pool.Value -ne "Started") {
-              Write-Error "IIS App Pool failed to start."
-              exit 1
-          }
-
-      # ----------------------------------------
-      # Cleanup
-      # ----------------------------------------
-      - name: Cleanup Temporary Files
-        shell: powershell
-        run: |
-
-          Remove-Item `
-            "C:\deploy\webapi-temp" `
+          Remove-Item "C:\deploy\webapp" `
             -Recurse `
             -Force `
             -ErrorAction SilentlyContinue
-
-          Write-Host "Temporary files cleaned."
