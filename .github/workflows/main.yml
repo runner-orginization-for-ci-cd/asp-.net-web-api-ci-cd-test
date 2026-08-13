@@ -3,15 +3,20 @@ name: ASP.NET CI/CD to IIS
 on:
   push:
     branches:
-      - master
+      - main
   workflow_dispatch:
 
 jobs:
+
+  # ==========================================
+  # BUILD
+  # ==========================================
   build:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
+
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Setup NuGet
@@ -20,72 +25,111 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Find solution file
-        id: findsln
-        shell: pwsh
+      # ----------------------------------------
+      # Find solution
+      # ----------------------------------------
+      - name: Find Solution
+        id: solution
+        shell: powershell
         run: |
-          $sln = Get-ChildItem -Path . -Filter *.sln -Recurse | Select-Object -First 1
+          $sln = Get-ChildItem -Path $env:GITHUB_WORKSPACE `
+            -Filter *.sln `
+            -Recurse |
+            Select-Object -First 1
 
           if (-not $sln) {
-            Write-Error "No .sln file found in repository."
+            Write-Error "No .sln file found."
             exit 1
           }
 
-          Write-Host "Found solution: $($sln.FullName)"
-          echo "SLN_PATH=$($sln.FullName)" >> $env:GITHUB_ENV
+          Write-Host "Solution found:"
+          Write-Host $sln.FullName
 
-      - name: Restore NuGet packages
+          "SLN_PATH=$($sln.FullName)" >> $env:GITHUB_ENV
+
+      # ----------------------------------------
+      # Restore NuGet
+      # ----------------------------------------
+      - name: Restore NuGet Packages
         shell: powershell
         run: |
-          nuget restore "${{ env.SLN_PATH }}"
+          nuget restore "$env:SLN_PATH"
 
-      - name: Build Application
+      # ----------------------------------------
+      # Build
+      # ----------------------------------------
+      - name: Build Solution
         shell: powershell
         run: |
-          msbuild "${{ env.SLN_PATH }}" `
+          msbuild "$env:SLN_PATH" `
+            /m `
             /p:Configuration=Release `
-            /p:Platform="Any CPU"
+            /p:DeployOnBuild=false
 
+      # ----------------------------------------
+      # Publish ASP.NET Web API
+      # ----------------------------------------
       - name: Publish Application
         shell: powershell
         run: |
-          $project = Get-ChildItem -Path . -Filter *.csproj -Recurse |
-            Select-Object -First 1
 
-          if (-not $project) {
-            Write-Error "No .csproj file found in repository."
-            exit 1
+          $publishPath = "$env:GITHUB_WORKSPACE\publish_output"
+
+          if (Test-Path $publishPath) {
+              Remove-Item $publishPath -Recurse -Force
           }
 
-          Write-Host "Publishing project: $($project.FullName)"
+          New-Item `
+            -ItemType Directory `
+            -Path $publishPath `
+            -Force | Out-Null
 
-          msbuild "$($project.FullName)" `
+          Write-Host "Publishing application..."
+
+          msbuild "$env:SLN_PATH" `
+            /m `
             /p:Configuration=Release `
-            /p:Platform="Any CPU" `
             /p:DeployOnBuild=true `
             /p:WebPublishMethod=FileSystem `
             /p:DeleteExistingFiles=true `
-            /p:publishUrl="$env:GITHUB_WORKSPACE\publish_output"
+            /p:publishUrl="$publishPath"
 
+      # ----------------------------------------
+      # Verify
+      # ----------------------------------------
       - name: Verify Publish Output
         shell: powershell
         run: |
-          Write-Host "Listing publish_output folder..."
 
-          if (!(Test-Path "$env:GITHUB_WORKSPACE\publish_output")) {
-            Write-Error "publish_output folder does not exist."
-            exit 1
+          $publishPath = "$env:GITHUB_WORKSPACE\publish_output"
+
+          if (!(Test-Path $publishPath)) {
+              Write-Error "Publish output was not created."
+              exit 1
           }
 
-          Get-ChildItem "$env:GITHUB_WORKSPACE\publish_output" -Recurse
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host " PUBLISH OUTPUT"
+          Write-Host "======================================"
 
+          Get-ChildItem $publishPath -Recurse
+
+      # ----------------------------------------
+      # Upload artifact
+      # ----------------------------------------
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
           name: webapi-publish
           path: publish_output
+          if-no-files-found: error
           retention-days: 2
 
+
+  # ==========================================
+  # DEPLOY TO IIS
+  # ==========================================
   deploy:
     needs: build
 
@@ -94,52 +138,122 @@ jobs:
       - Windows
 
     steps:
+
+      # ----------------------------------------
+      # Download artifact
+      # ----------------------------------------
       - name: Download Build Artifact
         uses: actions/download-artifact@v4
         with:
           name: webapi-publish
           path: C:\deploy\webapi-temp
 
+      # ----------------------------------------
+      # Stop IIS App Pool
+      # ----------------------------------------
       - name: Stop App Pool
         shell: powershell
         run: |
-          Import-Module WebAdministration
-          Stop-WebAppPool -Name "aspwebapi5pool"
 
+          Import-Module WebAdministration
+
+          $pool = "MyApiAppPool"
+
+          if (Test-Path "IIS:\AppPools\$pool") {
+              Write-Host "Stopping IIS App Pool: $pool"
+
+              Stop-WebAppPool -Name $pool
+
+              Start-Sleep -Seconds 3
+          }
+          else {
+              Write-Error "IIS App Pool '$pool' does not exist."
+              exit 1
+          }
+
+      # ----------------------------------------
+      # Deploy
+      # ----------------------------------------
       - name: Deploy Application to IIS
         shell: powershell
         run: |
+
           $source = "C:\deploy\webapi-temp"
-          $destination = "C:\inetpub\wwwroot\aspwebapi5"
+          $destination = "C:\inetpub\wwwroot\myapi"
+
+          Write-Host "Source:      $source"
+          Write-Host "Destination: $destination"
 
           if (!(Test-Path $destination)) {
-              New-Item -ItemType Directory -Path $destination -Force
+              New-Item `
+                -ItemType Directory `
+                -Path $destination `
+                -Force | Out-Null
           }
 
-          Write-Host "Removing old files..."
+          Write-Host "Removing old application files..."
 
-          Get-ChildItem $destination -Recurse -Force |
-              Remove-Item -Recurse -Force
-
-          Write-Host "Copying new build..."
-
-          Copy-Item "$source\*" `
-              -Destination $destination `
-              -Recurse `
-              -Force
-
-          Write-Host "Deployment completed."
-
-      - name: Start App Pool
-        shell: powershell
-        run: |
-          Import-Module WebAdministration
-          Start-WebAppPool -Name "aspwebapi5pool"
-
-      - name: Cleanup Temporary Files
-        shell: powershell
-        run: |
-          Remove-Item "C:\deploy\webapi-temp" `
+          Get-ChildItem `
+            -Path $destination `
+            -Recurse `
+            -Force |
+            Remove-Item `
               -Recurse `
               -Force `
               -ErrorAction SilentlyContinue
+
+          Write-Host "Copying new application..."
+
+          Copy-Item `
+            "$source\*" `
+            -Destination $destination `
+            -Recurse `
+            -Force
+
+          Write-Host "Deployment completed successfully."
+
+      # ----------------------------------------
+      # Start IIS App Pool
+      # ----------------------------------------
+      - name: Start App Pool
+        shell: powershell
+        run: |
+
+          Import-Module WebAdministration
+
+          Start-WebAppPool -Name "MyApiAppPool"
+
+          Write-Host "IIS App Pool started successfully."
+
+      # ----------------------------------------
+      # Verify IIS App Pool
+      # ----------------------------------------
+      - name: Verify App Pool
+        shell: powershell
+        run: |
+
+          Import-Module WebAdministration
+
+          $pool = Get-WebAppPoolState -Name "MyApiAppPool"
+
+          Write-Host "IIS App Pool State: $($pool.Value)"
+
+          if ($pool.Value -ne "Started") {
+              Write-Error "IIS App Pool failed to start."
+              exit 1
+          }
+
+      # ----------------------------------------
+      # Cleanup
+      # ----------------------------------------
+      - name: Cleanup Temporary Files
+        shell: powershell
+        run: |
+
+          Remove-Item `
+            "C:\deploy\webapi-temp" `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "Temporary files cleaned."
