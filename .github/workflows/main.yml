@@ -42,19 +42,42 @@ jobs:
       - name: Build Application
         shell: powershell
         run: |
-          msbuild "${{ env.SLN_PATH }}" /p:Configuration=Release /p:Platform="Any CPU"
+          msbuild "${{ env.SLN_PATH }}" `
+            /p:Configuration=Release `
+            /p:Platform="Any CPU"
+
+      - name: Publish Application
+        shell: powershell
+        run: |
+          $project = Get-ChildItem -Path . -Filter *.csproj -Recurse |
+            Select-Object -First 1
+
+          if (-not $project) {
+            Write-Error "No .csproj file found in repository."
+            exit 1
+          }
+
+          Write-Host "Publishing project: $($project.FullName)"
+
+          msbuild "$($project.FullName)" `
+            /p:Configuration=Release `
+            /p:Platform="Any CPU" `
+            /p:DeployOnBuild=true `
+            /p:WebPublishMethod=FileSystem `
+            /p:DeleteExistingFiles=true `
+            /p:publishUrl="$env:GITHUB_WORKSPACE\publish_output"
 
       - name: Verify Publish Output
         shell: powershell
         run: |
           Write-Host "Listing publish_output folder..."
 
-          if (!(Test-Path "publish_output")) {
-              Write-Error "publish_output folder does not exist."
-              exit 1
+          if (!(Test-Path "$env:GITHUB_WORKSPACE\publish_output")) {
+            Write-Error "publish_output folder does not exist."
+            exit 1
           }
 
-          Get-ChildItem "publish_output" -Recurse
+          Get-ChildItem "$env:GITHUB_WORKSPACE\publish_output" -Recurse
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
