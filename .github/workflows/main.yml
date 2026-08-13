@@ -11,22 +11,34 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.x'
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
 
-      - name: Restore Dependencies
-        run: dotnet restore MyApi/MyApi.csproj
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Find solution file
+        id: findsln
+        shell: pwsh
+        run: |
+          $sln = Get-ChildItem -Path . -Filter *.sln -Recurse | Select-Object -First 1
+
+          if (-not $sln) {
+            Write-Error "No .sln file found in repository."
+            exit 1
+          }
+
+          Write-Host "Found solution: $($sln.FullName)"
+          echo "SLN_PATH=$($sln.FullName)" >> $env:GITHUB_ENV
+
+      - name: Restore NuGet packages
+        run: nuget restore "${{ env.SLN_PATH }}"
 
       - name: Build Application
-        run: dotnet build MyApi/MyApi.csproj -c Release --no-restore
-
-      - name: Publish Application
-        run: dotnet publish MyApi/MyApi.csproj -c Release -o publish_output --no-build
+        run: msbuild "${{ env.SLN_PATH }}" /p:Configuration=Release /p:Platform="Any CPU"
 
       - name: Verify Publish Output
         run: |
@@ -63,7 +75,7 @@ jobs:
         shell: powershell
         run: |
           $source = "C:\deploy\webapi-temp"
-          $destination ="C:\inetpub\wwwroot\aspwebapi5"
+          $destination = "C:\inetpub\wwwroot\aspwebapi5"
 
           if (!(Test-Path $destination)) {
               New-Item -ItemType Directory -Path $destination -Force
